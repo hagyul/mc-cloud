@@ -1,0 +1,271 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>뭉치의 3D노드맵 Ver 2.0</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            font-family: sans-serif;
+            background-color: #000011; /* 어두운 배경색 추가 */
+        }
+        #search-container {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            z-index: 1;
+            background: rgba(255, 255, 255, 0.8);
+            padding: 10px;
+            border-radius: 8px;
+            opacity: 1; 
+            transition: opacity 0.3s ease;
+        }
+
+        /* PC 환경에서만 마우스 호버 시 보이기/숨기기 효과 적용 */
+        #search-container.hidden {
+            opacity: 0;
+        }
+        #search-container.hidden:hover {
+            opacity: 1;
+        }
+
+        #3d-graph {
+            width: 100vw;
+            height: 100vh;
+        }
+
+        /* ---------------------------------------------------- */
+        /* 모바일 및 태블릿 환경에 맞는 반응형 스타일 추가 */
+        /* 화면 너비가 768px 이하일 때 적용 */
+        @media screen and (max-width: 768px) {
+            #search-container {
+                top: 5px;
+                left: 5px;
+                padding: 5px;
+            }
+            #search-container input {
+                font-size: 14px; /* 입력 필드 글꼴 크기 조정 */
+            }
+            /* 모바일 환경에서는 숨김/보임 효과를 사용하지 않음 */
+            #search-container.hidden {
+                opacity: 1;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div id="search-container">
+        <input type="file" id="file-input" />
+        <input type="text" id="search" placeholder="태그 검색..." />
+    </div>
+    <div id="3d-graph"></div>
+
+    <script src="https://cdn.jsdelivr.net/npm/three@0.150.1/build/three.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.77.0/dist/3d-force-graph.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+
+    <script>
+        const graphEl = document.getElementById('3d-graph');
+        const searchInput = document.getElementById('search');
+        const fileInput = document.getElementById('file-input');
+        const searchContainer = document.getElementById('search-container');
+        let Graph;
+        let scene;
+        let lastSelectedNode = null;
+
+        // 모바일 기기인지 판별하는 함수
+        function isMobile() {
+            return /Android|webOS|iPhone|iPad|iPod|BlackBerry|IEMobile|Opera Mini/i.test(navigator.userAgent);
+        }
+
+        // 파일 선택 후 도구창의 가시성을 제어하는 함수
+        function handleToolContainerVisibility(isDataLoaded) {
+            if (isDataLoaded) {
+                // 데이터가 로드되면 도구창을 숨김 (모바일 제외)
+                if (!isMobile()) {
+                    searchContainer.classList.add('hidden');
+                }
+            } else {
+                // 초기 상태, 도구창을 보이게 함
+                searchContainer.classList.remove('hidden');
+            }
+        }
+
+        function highlightNode(node) {
+            if (lastSelectedNode && lastSelectedNode !== node) {
+                lastSelectedNode.color = lastSelectedNode.originalColor || 'white';
+                if (lastSelectedNode.glowMesh) {
+                    lastSelectedNode.__threeObj.remove(lastSelectedNode.glowMesh);
+                    lastSelectedNode.glowMesh = null;
+                }
+            }
+            if (!node) {
+                lastSelectedNode = null;
+                Graph.nodeColor(Graph.nodeColor());
+                return;
+            }
+            node.color = 'orange';
+            if (!node.glowMesh) {
+                const glowGeometry = new THREE.SphereGeometry(7, 32, 32);
+                const glowMaterial = new THREE.MeshBasicMaterial({ color: 0xffff66, transparent: true, opacity: 0.5 });
+                const glowMesh = new THREE.Mesh(glowGeometry, glowMaterial);
+                node.__threeObj.add(glowMesh);
+                node.glowMesh = glowMesh;
+            }
+            lastSelectedNode = node;
+            Graph.nodeColor(Graph.nodeColor());
+        }
+
+        function focusOnNode(node) {
+            if (!node || node.x === undefined) return;
+            const distance = 120;
+            const distRatio = 1 + distance / Math.hypot(node.x, node.y, node.z);
+            Graph.cameraPosition({ x: node.x * distRatio, y: node.y * distRatio, z: node.z * distRatio }, node, 1000);
+        }
+
+        function createTextSprite(text, font = 'bold 48px sans-serif', color = '#ffffff') {
+            const canvas = document.createElement('canvas');
+            const ctx = canvas.getContext('2d');
+            ctx.font = font;
+            const textWidth = ctx.measureText(text).width;
+            const scale = 2;
+            canvas.width = (textWidth + 40) * scale;
+            canvas.height = 64 * scale;
+            ctx.scale(scale, scale);
+            ctx.font = font;
+            ctx.fillStyle = color;
+            ctx.textBaseline = 'middle';
+            ctx.textAlign = 'center';
+            ctx.fillText(text, canvas.width / scale / 2, canvas.height / scale / 2);
+            const texture = new THREE.Texture(canvas);
+            texture.needsUpdate = true;
+            const material = new THREE.SpriteMaterial({ map: texture, transparent: true });
+            const sprite = new THREE.Sprite(material);
+            sprite.scale.set(canvas.width / scale / 8, canvas.height / scale / 8, 1);
+            return sprite;
+        }
+
+        function renderGraph(data) {
+            Graph = ForceGraph3D()(graphEl)
+                .graphData(data)
+                .nodeThreeObjectExtend(true)
+                .nodeThreeObject(node => {
+                    const sprite = createTextSprite(node.id, 'bold 48px sans-serif', node.originalColor || 'white');
+                    sprite.position.set(0, 10, 0);
+                    return sprite;
+                })
+                .linkWidth(() => 1)
+                .linkColor(link => link.color || 'white')
+                .linkDirectionalArrowLength(link => link.showArrow ? 5 : 0)
+                .linkDirectionalArrowRelPos(1)
+                .nodeColor(node => node.color || 'white')
+                .onNodeClick(node => {
+                    focusOnNode(node);
+                    highlightNode(node);
+                });
+            Graph.d3Force('link').distance(50);
+            scene = Graph.scene();
+        }
+
+        function parseExcel(file) {
+            const reader = new FileReader();
+            reader.onload = e => {
+                const data = new Uint8Array(e.target.result);
+                const workbook = XLSX.read(data, { type: 'array' });
+                const sheetName = workbook.SheetNames[0];
+                const worksheet = workbook.Sheets[sheetName];
+                const json = XLSX.utils.sheet_to_json(worksheet, { header: 1 });
+
+                const nodesMap = new Map();
+                const links = [];
+                
+                // C열의 색상 정보가 제대로 적용되지 않는 문제 해결을 위해
+                // 노드 파싱 로직을 두 단계로 분리합니다.
+
+                // 첫 번째 단계: 모든 노드의 초기 색상 정보를 파싱
+                for (let i = 1; i < json.length; i++) {
+                    const row = json[i];
+                    if (!row || !row[0]) continue;
+                    const source = row[0].trim();
+                    const color = row[2]?.trim();
+                    
+                    if (!nodesMap.has(source)) {
+                        nodesMap.set(source, {
+                            id: source,
+                            color: color || 'white',
+                            originalColor: color || 'white'
+                        });
+                    } else if (color) {
+                        // 이미 존재하는 노드라도 색상 정보가 있으면 업데이트
+                        nodesMap.get(source).color = color;
+                        nodesMap.get(source).originalColor = color;
+                    }
+                }
+                
+                // 두 번째 단계: 링크를 생성하고, 필요한 경우 타겟 노드를 추가
+                for (let i = 1; i < json.length; i++) {
+                    const row = json[i];
+                    if (!row || !row[0]) continue;
+                    const source = row[0].trim();
+                    const relatedTags = (row[1] || '').toString().split(',').map(tag => tag.trim()).filter(Boolean);
+                    const showArrow = row[3]?.toString().trim() === '1';
+                    const linkColor = row[4]?.trim() || 'white';
+                    
+                    relatedTags.forEach(target => {
+                        if (!nodesMap.has(target)) {
+                            // 타겟 노드가 소스로 정의되지 않은 경우에만 기본 색상 할당
+                            nodesMap.set(target, {
+                                id: target,
+                                color: 'white',
+                                originalColor: 'white'
+                            });
+                        }
+                        links.push({ source, target, showArrow, color: linkColor });
+                    });
+                }
+                
+                const nodeArray = Array.from(nodesMap.values());
+                if (nodeArray.length === 0) {
+                    alert('엑셀 파일에서 유효한 데이터를 찾을 수 없습니다.');
+                    return;
+                }
+                renderGraph({ nodes: nodeArray, links });
+                // 그래프 렌더링 후 도구창 가시성 제어
+                handleToolContainerVisibility(true);
+            };
+            reader.readAsArrayBuffer(file);
+        }
+
+        document.getElementById('file-input').addEventListener('change', e => {
+            const file = e.target.files[0];
+            if (file) parseExcel(file);
+        });
+        
+        // 파일 로드 전에는 도구창을 항상 보이게 설정
+        handleToolContainerVisibility(false);
+
+        searchInput.addEventListener('input', () => {
+            const term = searchInput.value.trim().toLowerCase();
+            if (!Graph) return;
+            if (!term) {
+                highlightNode(null);
+                return;
+            }
+            const found = Graph.graphData().nodes.find(node => node.id.toLowerCase().includes(term));
+            if (found) {
+                focusOnNode(found);
+                highlightNode(found);
+            }
+        });
+        
+        window.addEventListener('resize', () => {
+            if (Graph) {
+                Graph.width(window.innerWidth);
+                Graph.height(window.innerHeight);
+            }
+        });
+    </script>
+</body>
+</html>
